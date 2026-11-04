@@ -1,4 +1,3 @@
-
 name: Gerar APK Android
 
 on:
@@ -21,18 +20,104 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configurar Gradle 8.9
+      - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Extrair projeto Android
+      - name: Extrair projeto
+        run: unzip -o ControlePressaoAndroid.zip -d .
+
+      - name: Corrigir impressão do relatório
         run: |
-          unzip -o ControlePressaoAndroid.zip -d .
+          python3 <<'PY'
+          from pathlib import Path
+
+          base = Path("ControlePressaoAndroid")
+          java = base / "app/src/main/java/br/com/didhuuu/controlepressao/MainActivity.java"
+          html = base / "app/src/main/assets/index.html"
+
+          if not java.exists():
+              raise SystemExit("MainActivity.java não encontrado")
+
+          if not html.exists():
+              raise SystemExit("index.html não encontrado")
+
+          s = java.read_text()
+
+          if "import android.print.PrintAttributes;" not in s:
+              s = s.replace(
+                  "import android.print.PrintManager;",
+                  "import android.print.PrintManager;\n"
+                  "import android.print.PrintAttributes;\n"
+                  "import android.print.PrintDocumentAdapter;"
+              )
+
+          if "import android.webkit.JavascriptInterface;" not in s:
+              s = s.replace(
+                  "import android.webkit.WebView;",
+                  "import android.webkit.WebView;\n"
+                  "import android.webkit.JavascriptInterface;"
+              )
+
+          if "AndroidPrint" not in s:
+              marker = "web.setWebChromeClient(new WebChromeClient());"
+              bridge = """
+          web.setWebChromeClient(new WebChromeClient());
+          web.addJavascriptInterface(new Object() {
+              @JavascriptInterface
+              public void printReport() {
+                  runOnUiThread(() -> printReportNative());
+              }
+          }, "AndroidPrint");
+          """
+              if marker not in s:
+                  raise SystemExit("Não encontrei configuração do WebView")
+              s = s.replace(marker, bridge)
+
+          if "private void printReportNative()" not in s:
+              method = """
+          private void printReportNative() {
+              PrintManager pm =
+                  (PrintManager) getSystemService(Context.PRINT_SERVICE);
+
+              if (pm == null || web == null) {
+                  Toast.makeText(this,
+                      "Impressão indisponível",
+                      Toast.LENGTH_SHORT).show();
+                  return;
+              }
+
+              PrintDocumentAdapter adapter =
+                  web.createPrintDocumentAdapter("Relatorio de Pressao");
+
+              pm.print(
+                  "Relatorio de Pressao",
+                  adapter,
+                  new PrintAttributes.Builder().build()
+              );
+          }
+
+          """
+              marker = "@Override public void onBackPressed()"
+              if marker not in s:
+                  raise SystemExit("Não encontrei onBackPressed para inserir método")
+              s = s.replace(marker, method + marker)
+
+          java.write_text(s)
+
+          h = html.read_text()
+          h = h.replace(
+              'onclick="window.print()"',
+              'onclick="AndroidPrint.printReport()"'
+          )
+          html.write_text(h)
+
+          print("Correção de impressão aplicada.")
+          PY
 
       - name: Compilar APK
-        run: |
-          gradle -p ControlePressaoAndroid assembleDebug
+        run: gradle -p ControlePressaoAndroid assembleDebug
 
       - name: Salvar APK
         uses: actions/upload-artifact@v4
